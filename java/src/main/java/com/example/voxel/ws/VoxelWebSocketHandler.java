@@ -61,6 +61,11 @@ public class VoxelWebSocketHandler extends TextWebSocketHandler {
             case "join" -> send(world.join(clientId));
             case "leave" -> send(world.leave(clientId));
             case "place" -> handlePlace(clientId, node);
+            case "move" -> handleMove(clientId, node);
+            case "remove" -> handleRemove(clientId, node);
+            case "confirm" -> send(world.confirm(clientId));
+            case "cancel" -> send(world.cancel(clientId));
+            case "rename" -> handleRename(clientId, node);
             default -> send(world.errorTo(clientId, "bad_block", "未知消息类型: " + type));
         }
     }
@@ -75,6 +80,41 @@ public class VoxelWebSocketHandler extends TextWebSocketHandler {
         send(world.place(clientId,
                 node.get("x").asInt(), node.get("y").asInt(), node.get("z").asInt(),
                 node.get("material").asText(), node.get("color").asText()));
+    }
+
+    private void handleMove(String clientId, JsonNode node) {
+        JsonNode from = node.path("from");
+        JsonNode to = node.path("to");
+        if (!hasCoord(from) || !hasCoord(to)) {
+            send(world.errorTo(clientId, "bad_block", "move 缺少 from/to 坐标"));
+            return;
+        }
+        send(world.move(clientId,
+                from.get("x").asInt(), from.get("y").asInt(), from.get("z").asInt(),
+                to.get("x").asInt(), to.get("y").asInt(), to.get("z").asInt()));
+    }
+
+    private void handleRemove(String clientId, JsonNode node) {
+        if (!hasCoord(node)) {
+            send(world.errorTo(clientId, "bad_block", "remove 缺少 x/y/z 字段"));
+            return;
+        }
+        send(world.remove(clientId,
+                node.get("x").asInt(), node.get("y").asInt(), node.get("z").asInt()));
+    }
+
+    private void handleRename(String clientId, JsonNode node) {
+        if (!node.hasNonNull("nickname") || !node.get("nickname").isTextual()) {
+            send(world.errorTo(clientId, "bad_block", "rename 缺少 nickname 字段"));
+            return;
+        }
+        send(world.rename(clientId, node.get("nickname").asText()));
+    }
+
+    private static boolean hasCoord(JsonNode n) {
+        return n.isObject()
+                && n.hasNonNull("x") && n.hasNonNull("y") && n.hasNonNull("z")
+                && n.get("x").isNumber() && n.get("y").isNumber() && n.get("z").isNumber();
     }
 
     @Override

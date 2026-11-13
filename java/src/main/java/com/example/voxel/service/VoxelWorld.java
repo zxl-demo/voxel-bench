@@ -16,13 +16,20 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * In-memory world state + queue/turn rules (SPEC v1).
+ * In-memory world state + queue/turn rules (SPEC v2).
  *
  * <p>All methods are synchronized; they return outbound messages instead of
  * sending them, so no I/O happens while the lock is held. A null target
  * means broadcast to all connected clients.
+ *
+ * <p>v2 model: confirmed blocks live in {@code blocks}; blocks placed this
+ * turn stay in {@code pending} until {@link #confirm} moves them over (or
+ * timeout / cancel / disconnect clears them). A pending block only supports
+ * its own owner's blocks, so a timeout cleanup can never strand someone
+ * else's block in mid-air.
  */
 @Service
 public class VoxelWorld {
@@ -31,6 +38,11 @@ public class VoxelWorld {
             Set.of("grass", "dirt", "stone", "wood", "glass", "brick");
     public static final Set<String> COLORS =
             Set.of("red", "orange", "yellow", "green", "blue", "purple", "white", "black");
+
+    private static final String[] NICK_ADJECTIVES = {
+            "快乐", "闪亮", "硬核", "安静", "飞翔", "迷糊", "勇敢", "温柔", "机灵", "淡定"};
+    private static final String[] NICK_NOUNS = {
+            "砖匠", "建筑师", "方块君", "矿工", "工匠", "探险家", "设计师", "雕刻家", "造物主", "筑梦师"};
 
     public record Outbound(String target, String json) {
         public static Outbound to(String clientId, String json) {
@@ -45,7 +57,9 @@ public class VoxelWorld {
     private final ObjectMapper mapper = new ObjectMapper();
     private final VoxelProperties props;
 
-    private final Map<Coord, Block> blocks = new HashMap<>();
+    private final Map<Coord, Block> blocks = new HashMap<>();  // confirmed
+    private final Map<Coord, Block> pending = new HashMap<>(); // pending confirmation
+    private final Map<String, String> nicknames = new HashMap<>(); // clientId -> nickname
     private final Set<String> connected = new HashSet<>();
     private final Deque<String> queue = new ArrayDeque<>();
     private final Map<String, Long> placing = new HashMap<>(); // clientId -> deadline epoch millis
@@ -56,23 +70,49 @@ public class VoxelWorld {
 
     // ---- lifecycle -------------------------------------------------------
 
-    /** New connection: register + full sync to the client + queue broadcast. */
+    /** New connection: assign a random nickname, full sync, queue broadcast. */
     public synchronized List<Outbound> connect(String clientId) {
         connected.add(clientId);
+        nicknames.put(clientId, assignNickname(clientId));
         return List.of(Outbound.to(clientId, initJson(clientId)), Outbound.all(queueStateJson()));
     }
 
-    /** Disconnect: leave queue / release turn, grant the next in line. */
+    /** Disconnect: leave queue / release turn, clear own pending, free nickname. */
     public synchronized List<Outbound> disconnect(String clientId) {
         connected.remove(clientId);
         queue.remove(clientId);
-        boolean wasPlacing = placing.remove(clientId) != null;
+        nicknames.remove(clientId);
         List<Outbound> out = new ArrayList<>();
-        out.add(Outbound.all(queueStateJson()));
-        if (wasPlacing) {
+        if (placing.remove(clientId) != null) {
+            out.addAll(clearPendingLocked(clientId, "disconnect"));
+            out.add(Outbound.all(queueStateJson()));
             out.addAll(grantLocked());
+        } else {
+            out.add(Outbound.all(queueStateJson()));
         }
         return out;
+    }
+
+    // ---- nickname --------------------------------------------------------
+
+    public synchronized List<Outbound> rename(String clientId, String nickname) {
+        String name = nickname == null ? "" : nickname.trim();
+        if (name.isEmpty() || name.length() > 12 || hasControlChar(name)) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("name_invalid", "昵称需为 1–12 个字符，不能含控制字符")));
+        }
+        if (name.equals(nicknames.get(clientId))) {
+            return List.of(); // unchanged
+        }
+        if (nicknames.containsValue(name)) {
+            return List.of(Outbound.to(clientId, errorJson("name_taken", "这个昵称已被占用")));
+        }
+        nicknames.put(clientId, name);
+        ObjectNode root = mapper.createObjectNode();
+        root.put("type", "renamed");
+        root.put("clientId", clientId);
+        root.put("nickname", name);
+        return List.of(Outbound.all(root.toString()), Outbound.all(queueStateJson()));
     }
 
     // ---- queue / turn ----------------------------------------------------
@@ -100,54 +140,142 @@ public class VoxelWorld {
         return List.of(); // only effective while queued
     }
 
+    // ---- placement -------------------------------------------------------
+
     public synchronized List<Outbound> place(String clientId, int x, int y, int z,
                                              String material, String color) {
-        // 1. must hold a live turn
-        Long deadline = placing.get(clientId);
-        if (deadline == null) {
+        List<Outbound> err = requireLiveTurn(clientId);
+        if (err != null) {
+            return err;
+        }
+        // per-turn quota
+        if (pendingCount(clientId) >= props.getBlocksPerTurn()) {
             return List.of(Outbound.to(clientId,
-                    errorJson("not_your_turn", "当前不是你的放置回合")));
+                    errorJson("quota_exceeded", "本轮已放满，请先确认放置")));
         }
-        if (deadline <= System.currentTimeMillis()) {
-            // expired between ticks: release as timeout, then reject this attempt
-            placing.remove(clientId);
-            List<Outbound> out = new ArrayList<>();
-            out.add(Outbound.to(clientId, turnReleasedJson("timeout")));
-            out.add(Outbound.all(queueStateJson()));
-            out.addAll(grantLocked());
-            out.add(Outbound.to(clientId, errorJson("not_your_turn", "放置权已过期")));
-            return out;
-        }
-        // invalid coordinates
         if (y < 0) {
             return List.of(Outbound.to(clientId, errorJson("bad_block", "y 不能小于 0")));
         }
         Coord coord = new Coord(x, y, z);
-        // 2. target cell must be empty
-        if (blocks.containsKey(coord)) {
+        // target cell must be empty (confirmed or anyone's pending)
+        if (blocks.containsKey(coord) || pending.containsKey(coord)) {
             return List.of(Outbound.to(clientId, errorJson("cell_occupied", "该位置已有方块")));
         }
-        // 3. no floating: y == 0 or at least one of the 6 neighbors exists
-        if (!isSupported(coord)) {
+        // no floating: y == 0 or a neighbor in blocks / own pending
+        if (!isSupported(coord, clientId)) {
             return List.of(Outbound.to(clientId, errorJson("floating", "方块不可以放到空中")));
         }
-        // 4. material / color must be legal
         if (!MATERIALS.contains(material) || !COLORS.contains(color)) {
             return List.of(Outbound.to(clientId, errorJson("bad_block", "材质或颜色不合法")));
         }
 
-        Block block = new Block(x, y, z, material, color);
-        blocks.put(coord, block);
-        placing.remove(clientId); // one block per turn
+        Block block = new Block(x, y, z, material, color,
+                nicknameOf(clientId), null, true, clientId);
+        pending.put(coord, block);
+        // turn is kept; queue_state carries the new pendingCount
+        return List.of(
+                Outbound.all(blockPlacedJson(block)),
+                Outbound.all(queueStateJson()));
+    }
+
+    public synchronized List<Outbound> move(String clientId,
+                                            int fromX, int fromY, int fromZ,
+                                            int toX, int toY, int toZ) {
+        List<Outbound> err = requireLiveTurn(clientId);
+        if (err != null) {
+            return err;
+        }
+        Coord from = new Coord(fromX, fromY, fromZ);
+        Block block = pending.get(from);
+        if (block == null) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("no_such_block", "该位置没有待确认方块")));
+        }
+        if (!clientId.equals(block.byId())) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("not_pending_owner", "不能移动别人的方块")));
+        }
+        if (toY < 0) {
+            return List.of(Outbound.to(clientId, errorJson("bad_block", "y 不能小于 0")));
+        }
+        Coord to = new Coord(toX, toY, toZ);
+        if (!to.equals(from) && (blocks.containsKey(to) || pending.containsKey(to))) {
+            return List.of(Outbound.to(clientId, errorJson("cell_occupied", "目标位置已有方块")));
+        }
+        Set<Coord> simulated = ownPendingCoords(clientId);
+        simulated.remove(from);
+        simulated.add(to);
+        if (!allPendingSupported(simulated)) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("would_float", "移动后会有方块悬空")));
+        }
+        pending.remove(from);
+        pending.put(to, new Block(toX, toY, toZ, block.material(), block.color(),
+                block.by(), null, true, clientId));
+        return List.of(Outbound.all(blockMovedJson(from, to, block)));
+    }
+
+    public synchronized List<Outbound> remove(String clientId, int x, int y, int z) {
+        List<Outbound> err = requireLiveTurn(clientId);
+        if (err != null) {
+            return err;
+        }
+        Coord coord = new Coord(x, y, z);
+        Block block = pending.get(coord);
+        if (block == null) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("no_such_block", "该位置没有待确认方块")));
+        }
+        if (!clientId.equals(block.byId())) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("not_pending_owner", "不能移除别人的方块")));
+        }
+        Set<Coord> simulated = ownPendingCoords(clientId);
+        simulated.remove(coord);
+        if (!allPendingSupported(simulated)) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("would_float", "移除后会有方块悬空")));
+        }
+        pending.remove(coord);
+        return List.of(
+                Outbound.all(blockRemovedJson(coord, "removed")),
+                Outbound.all(queueStateJson()));
+    }
+
+    /** Confirm all own pending blocks, then release the turn. */
+    public synchronized List<Outbound> confirm(String clientId) {
+        List<Outbound> err = requireLiveTurn(clientId);
+        if (err != null) {
+            return err;
+        }
         List<Outbound> out = new ArrayList<>();
-        out.add(Outbound.all(blockPlacedJson(block, clientId)));
-        out.add(Outbound.to(clientId, turnReleasedJson("placed")));
-        out.add(Outbound.all(queueStateJson()));
-        out.addAll(grantLocked());
+        long now = System.currentTimeMillis();
+        String nickname = nicknameOf(clientId);
+        List<Block> confirmed = new ArrayList<>();
+        for (Coord coord : ownPendingCoords(clientId)) {
+            Block p = pending.remove(coord);
+            Block done = new Block(p.x(), p.y(), p.z(), p.material(), p.color(),
+                    nickname, now, false, clientId);
+            blocks.put(coord, done);
+            confirmed.add(done);
+        }
+        if (!confirmed.isEmpty()) {
+            out.add(Outbound.all(blocksConfirmedJson(confirmed)));
+        }
+        out.addAll(releaseTurnLocked(clientId, "confirmed", true));
         return out;
     }
 
-    /** 1s tick: expire overdue turns, then broadcast the countdown. */
+    /** Clear all own pending blocks and give up the turn. */
+    public synchronized List<Outbound> cancel(String clientId) {
+        List<Outbound> err = requireLiveTurn(clientId);
+        if (err != null) {
+            return err;
+        }
+        return releaseTurnLocked(clientId, "cancelled", true);
+    }
+
+    /** 1s tick: expire overdue turns (clearing their pending), broadcast countdown. */
     public synchronized List<Outbound> tick() {
         long now = System.currentTimeMillis();
         List<Outbound> out = new ArrayList<>();
@@ -160,7 +288,9 @@ public class VoxelWorld {
         if (!expired.isEmpty()) {
             for (String id : expired) {
                 placing.remove(id);
-                out.add(Outbound.to(id, turnReleasedJson("timeout")));
+                List<Outbound> cleared = clearPendingLocked(id, "timeout");
+                out.addAll(cleared);
+                out.add(Outbound.to(id, turnReleasedJson("timeout", cleared.size())));
             }
             out.add(Outbound.all(queueStateJson()));
             out.addAll(grantLocked());
@@ -178,8 +308,10 @@ public class VoxelWorld {
 
     public synchronized Map<String, Object> snapshot() {
         Map<String, Object> snap = new LinkedHashMap<>();
-        snap.put("blocks", new ArrayList<>(blocks.values()));
-        snap.put("waiting", new ArrayList<>(queue));
+        List<Block> all = new ArrayList<>(blocks.values());
+        all.addAll(pending.values());
+        snap.put("blocks", all);
+        snap.put("waiting", waitingList());
         snap.put("placing", placingList());
         snap.put("online", connected.size());
         snap.put("config", configMap());
@@ -189,6 +321,7 @@ public class VoxelWorld {
     public synchronized Map<String, Object> configMap() {
         Map<String, Object> cfg = new LinkedHashMap<>();
         cfg.put("turnSeconds", props.getTurnSeconds());
+        cfg.put("blocksPerTurn", props.getBlocksPerTurn());
         cfg.put("placersMax", props.getPlacersMax());
         cfg.put("queueMaxLength", props.getQueueMaxLength());
         return cfg;
@@ -213,16 +346,165 @@ public class VoxelWorld {
         return out;
     }
 
-    private boolean isSupported(Coord c) {
+    /**
+     * Release a turn: clear the owner's pending blocks (reason), notify the
+     * owner, broadcast queue state, grant the next in line. Caller holds the
+     * lock. For "confirmed" the pending set is already empty (confirm moved
+     * them to blocks first), so no block_removed is emitted.
+     */
+    private List<Outbound> releaseTurnLocked(String clientId, String reason, boolean notifyClient) {
+        List<Outbound> out = new ArrayList<>();
+        placing.remove(clientId);
+        List<Outbound> cleared = clearPendingLocked(clientId, reason);
+        out.addAll(cleared);
+        if (notifyClient) {
+            out.add(Outbound.to(clientId, turnReleasedJson(reason, cleared.size())));
+        }
+        out.add(Outbound.all(queueStateJson()));
+        out.addAll(grantLocked());
+        return out;
+    }
+
+    /** An action arrived after the turn expired: release it, then report not_your_turn. */
+    private List<Outbound> expiredTurnLocked(String clientId) {
+        List<Outbound> out = new ArrayList<>(releaseTurnLocked(clientId, "timeout", true));
+        out.add(Outbound.to(clientId, errorJson("not_your_turn", "放置权已过期")));
+        return out;
+    }
+
+    /** Null when the client holds a live turn, otherwise the error outbounds. */
+    private List<Outbound> requireLiveTurn(String clientId) {
+        Long deadline = placing.get(clientId);
+        if (deadline == null) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("not_your_turn", "当前不是你的放置回合")));
+        }
+        if (deadline <= System.currentTimeMillis()) {
+            return expiredTurnLocked(clientId);
+        }
+        return null;
+    }
+
+    /** Remove all of one client's pending blocks, one block_removed broadcast each. */
+    private List<Outbound> clearPendingLocked(String clientId, String reason) {
+        List<Outbound> out = new ArrayList<>();
+        for (Coord coord : ownPendingCoords(clientId)) {
+            pending.remove(coord);
+            out.add(Outbound.all(blockRemovedJson(coord, reason)));
+        }
+        return out;
+    }
+
+    private int pendingCount(String clientId) {
+        int n = 0;
+        for (Block b : pending.values()) {
+            if (clientId.equals(b.byId())) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    private Set<Coord> ownPendingCoords(String clientId) {
+        Set<Coord> coords = new HashSet<>();
+        for (Map.Entry<Coord, Block> e : pending.entrySet()) {
+            if (clientId.equals(e.getValue().byId())) {
+                coords.add(e.getKey());
+            }
+        }
+        return coords;
+    }
+
+    /** y == 0, or a neighbor in confirmed blocks, or a neighbor in the owner's own pending. */
+    private boolean isSupported(Coord c, String ownerId) {
         if (c.y() == 0) {
             return true;
         }
-        return blocks.containsKey(new Coord(c.x() + 1, c.y(), c.z()))
-                || blocks.containsKey(new Coord(c.x() - 1, c.y(), c.z()))
-                || blocks.containsKey(new Coord(c.x(), c.y() + 1, c.z()))
-                || blocks.containsKey(new Coord(c.x(), c.y() - 1, c.z()))
-                || blocks.containsKey(new Coord(c.x(), c.y(), c.z() + 1))
-                || blocks.containsKey(new Coord(c.x(), c.y(), c.z() - 1));
+        for (Coord n : neighbors(c)) {
+            if (blocks.containsKey(n)) {
+                return true;
+            }
+            Block p = pending.get(n);
+            if (p != null && ownerId.equals(p.byId())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Every coord in the simulated own-pending set must be supported by blocks ∪ the set itself. */
+    private boolean allPendingSupported(Set<Coord> simulated) {
+        for (Coord c : simulated) {
+            if (c.y() == 0) {
+                continue;
+            }
+            boolean ok = false;
+            for (Coord n : neighbors(c)) {
+                if (blocks.containsKey(n) || simulated.contains(n)) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static List<Coord> neighbors(Coord c) {
+        return List.of(
+                new Coord(c.x() + 1, c.y(), c.z()),
+                new Coord(c.x() - 1, c.y(), c.z()),
+                new Coord(c.x(), c.y() + 1, c.z()),
+                new Coord(c.x(), c.y() - 1, c.z()),
+                new Coord(c.x(), c.y(), c.z() + 1),
+                new Coord(c.x(), c.y(), c.z() - 1));
+    }
+
+    private String nicknameOf(String clientId) {
+        return nicknames.getOrDefault(clientId, clientId);
+    }
+
+    /** Random adjective × noun nickname, unique among online users. */
+    private String assignNickname(String clientId) {
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+        String base = NICK_ADJECTIVES[0] + NICK_NOUNS[0];
+        for (int i = 0; i < 20; i++) {
+            base = NICK_ADJECTIVES[rnd.nextInt(NICK_ADJECTIVES.length)]
+                    + NICK_NOUNS[rnd.nextInt(NICK_NOUNS.length)];
+            if (!nicknames.containsValue(base)) {
+                return base;
+            }
+        }
+        for (int i = 0; i < 50; i++) {
+            String cand = base + (10 + rnd.nextInt(90));
+            if (!nicknames.containsValue(cand)) {
+                return cand;
+            }
+        }
+        return base + "-" + clientId.substring(2, 6); // practically unreachable
+    }
+
+    private static boolean hasControlChar(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x20 || c == 0x7f) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<Map<String, Object>> waitingList() {
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (String id : queue) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("clientId", id);
+            m.put("nickname", nicknameOf(id));
+            list.add(m);
+        }
+        return list;
     }
 
     private List<Map<String, Object>> placingList() {
@@ -230,7 +512,9 @@ public class VoxelWorld {
         for (Map.Entry<String, Long> e : placing.entrySet()) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("clientId", e.getKey());
+            m.put("nickname", nicknameOf(e.getKey()));
             m.put("deadline", e.getValue());
+            m.put("pendingCount", pendingCount(e.getKey()));
             list.add(m);
         }
         return list;
@@ -245,9 +529,13 @@ public class VoxelWorld {
         for (Block b : blocks.values()) {
             arr.add(blockNode(b));
         }
+        for (Block b : pending.values()) {
+            arr.add(blockNode(b));
+        }
         root.set("config", mapper.valueToTree(configMap()));
         ObjectNode me = root.putObject("me");
         me.put("clientId", clientId);
+        me.put("nickname", nicknameOf(clientId));
         me.put("state", placing.containsKey(clientId) ? "placing"
                 : queue.contains(clientId) ? "queued" : "watching");
         root.put("online", connected.size());
@@ -258,12 +546,18 @@ public class VoxelWorld {
         ObjectNode root = mapper.createObjectNode();
         root.put("type", "queue_state");
         ArrayNode waiting = root.putArray("waiting");
-        queue.forEach(waiting::add);
+        for (String id : queue) {
+            ObjectNode w = waiting.addObject();
+            w.put("clientId", id);
+            w.put("nickname", nicknameOf(id));
+        }
         ArrayNode placingArr = root.putArray("placing");
         for (Map.Entry<String, Long> e : placing.entrySet()) {
             ObjectNode p = placingArr.addObject();
             p.put("clientId", e.getKey());
+            p.put("nickname", nicknameOf(e.getKey()));
             p.put("deadline", e.getValue());
+            p.put("pendingCount", pendingCount(e.getKey()));
         }
         root.put("online", connected.size());
         return root.toString();
@@ -276,7 +570,9 @@ public class VoxelWorld {
         for (Map.Entry<String, Long> e : placing.entrySet()) {
             ObjectNode p = arr.addObject();
             p.put("clientId", e.getKey());
+            p.put("nickname", nicknameOf(e.getKey()));
             p.put("secondsLeft", Math.max(0, (int) Math.ceil((e.getValue() - now) / 1000.0)));
+            p.put("pendingCount", pendingCount(e.getKey()));
         }
         return root.toString();
     }
@@ -285,20 +581,59 @@ public class VoxelWorld {
         ObjectNode root = mapper.createObjectNode();
         root.put("type", "turn_granted");
         root.put("deadline", deadline);
+        root.put("blocksPerTurn", props.getBlocksPerTurn());
         return root.toString();
     }
 
-    private String turnReleasedJson(String reason) {
+    private String turnReleasedJson(String reason, int cleared) {
         ObjectNode root = mapper.createObjectNode();
         root.put("type", "turn_released");
+        root.put("reason", reason);
+        if (cleared > 0) {
+            root.put("cleared", cleared);
+        }
+        return root.toString();
+    }
+
+    private String blockPlacedJson(Block b) {
+        ObjectNode root = blockNode(b);
+        root.put("type", "block_placed");
+        return root.toString();
+    }
+
+    private String blockMovedJson(Coord from, Coord to, Block block) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("type", "block_moved");
+        ObjectNode f = root.putObject("from");
+        f.put("x", from.x());
+        f.put("y", from.y());
+        f.put("z", from.z());
+        ObjectNode t = root.putObject("to");
+        t.put("x", to.x());
+        t.put("y", to.y());
+        t.put("z", to.z());
+        root.put("by", block.by());
+        root.put("byId", block.byId());
+        return root.toString();
+    }
+
+    private String blockRemovedJson(Coord c, String reason) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("type", "block_removed");
+        root.put("x", c.x());
+        root.put("y", c.y());
+        root.put("z", c.z());
         root.put("reason", reason);
         return root.toString();
     }
 
-    private String blockPlacedJson(Block b, String by) {
-        ObjectNode root = blockNode(b);
-        root.put("type", "block_placed");
-        root.put("by", by);
+    private String blocksConfirmedJson(List<Block> confirmed) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("type", "blocks_confirmed");
+        ArrayNode arr = root.putArray("blocks");
+        for (Block b : confirmed) {
+            arr.add(blockNode(b));
+        }
         return root.toString();
     }
 
@@ -309,6 +644,10 @@ public class VoxelWorld {
         n.put("z", b.z());
         n.put("material", b.material());
         n.put("color", b.color());
+        n.put("by", b.by());
+        n.put("placedAt", b.placedAt()); // null while pending (Jackson writes null)
+        n.put("pending", b.pending());
+        n.put("byId", b.byId());
         return n;
     }
 

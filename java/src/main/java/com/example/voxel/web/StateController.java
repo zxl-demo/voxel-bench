@@ -6,7 +6,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
 
-/** Debug / fallback REST endpoints (SPEC v1). */
+/** Debug / fallback REST endpoints (SPEC v2). */
 @RestController
 public class StateController {
 

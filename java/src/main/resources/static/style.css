@@ -11,6 +11,23 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, "PingFa
 }
 #topbar .title { font-size: 17px; font-weight: 700; }
 #topbar .online { font-size: 13px; color: #555; }
+.me-nick { font-size: 13px; color: #333; display: flex; align-items: center; gap: 4px; }
+#my-nickname { font-weight: 600; cursor: pointer; }
+#my-nickname:hover { color: #1e88e5; }
+#rename-btn {
+  border: none; background: none; cursor: pointer; font-size: 13px;
+  color: #888; padding: 2px 4px; border-radius: 4px;
+}
+#rename-btn:hover { color: #1e88e5; background: #e3f2fd; }
+#nickname-input {
+  width: 110px; font-size: 13px; padding: 3px 6px;
+  border: 1px solid #1e88e5; border-radius: 6px; outline: none;
+}
+#reset-view-btn {
+  border: 1px solid #ddd; background: #fff; cursor: pointer;
+  font-size: 13px; padding: 4px 10px; border-radius: 7px; color: #444;
+}
+#reset-view-btn:hover { background: #f5f5f5; }
 
 #panel {
   position: fixed; top: 12px; right: 12px; z-index: 10; width: 228px;
@@ -32,6 +49,9 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, "PingFa
   background: #43a047; transition: width .2s linear;
 }
 #countdown-text { font-size: 12px; color: #555; margin-top: 3px; text-align: right; }
+#countdown-wrap.urgent #countdown-bar::before { background: #e53935; animation: pulse .8s ease-in-out infinite; }
+#countdown-wrap.urgent #countdown-text { color: #c62828; font-weight: 700; text-align: left; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 
 #queue-btn {
   width: 100%; padding: 9px 0; font-size: 15px; font-weight: 600;
@@ -43,6 +63,21 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, "PingFa
 #queue-btn.leave:hover { background: #c62828; }
 #queue-info { font-size: 12px; color: #666; margin-top: 6px; min-height: 16px; }
 
+#place-status { font-size: 13px; font-weight: 600; margin-top: 4px; min-height: 18px; color: #666; }
+#place-status.good { color: #2e7d32; }
+#place-status.bad { color: #c62828; }
+
+#turn-actions { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+#turn-actions button {
+  width: 100%; padding: 8px 0; font-size: 14px; font-weight: 600;
+  border: none; border-radius: 8px; cursor: pointer;
+}
+#turn-actions button.primary { color: #fff; background: #2e7d32; }
+#turn-actions button.primary:hover { background: #1b5e20; }
+#turn-actions button.secondary { color: #444; background: #eeeeee; }
+#turn-actions button.secondary:hover { background: #e0e0e0; }
+#remove-selected-btn.secondary { color: #c62828; }
+
 .choices { display: flex; flex-wrap: wrap; gap: 6px; }
 .choice {
   padding: 5px 9px; font-size: 13px; border: 2px solid #ddd; border-radius: 7px;
@@ -51,6 +86,10 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, "PingFa
 .choice.selected { border-color: #1e88e5; background: #e3f2fd; font-weight: 600; }
 .swatch { width: 30px; height: 30px; padding: 0; border-radius: 7px; border: 2px solid #ddd; cursor: pointer; }
 .swatch.selected { border-color: #222; box-shadow: 0 0 0 2px #1e88e5; }
+
+#block-info { font-size: 13px; color: #333; }
+#block-info div { padding: 2px 0; }
+#block-info span { display: inline-block; width: 64px; color: #888; }
 
 #placers, #waiting { font-size: 13px; color: #333; }
 #placers div, #waiting div { padding: 2px 0; }
@@ -61,6 +100,11 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, "PingFa
   position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 10;
   background: rgba(0,0,0,.55); color: #fff; font-size: 12px;
   padding: 6px 14px; border-radius: 20px; white-space: nowrap;
+}
+#block-tip {
+  position: fixed; z-index: 15; pointer-events: none;
+  background: rgba(0,0,0,.78); color: #fff; font-size: 12px;
+  padding: 5px 9px; border-radius: 6px; white-space: nowrap;
 }
 #toast {
   position: fixed; bottom: 56px; left: 50%; transform: translateX(-50%); z-index: 20;

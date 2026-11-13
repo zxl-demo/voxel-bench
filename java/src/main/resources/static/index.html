@@ -18,7 +18,9 @@
 
 <div id="topbar">
   <div class="title">🧊 方块世界</div>
+  <div class="me-nick">你：<span id="my-nickname">…</span><button id="rename-btn" title="修改昵称">✎</button><input id="nickname-input" class="hidden" maxlength="12" autocomplete="off"></div>
   <div class="online">在线 <span id="online-count">0</span> 人</div>
+  <button id="reset-view-btn">重置视角</button>
 </div>
 
 <div id="panel">
@@ -30,6 +32,12 @@
     </div>
     <button id="queue-btn">抢占放置权</button>
     <div id="queue-info"></div>
+    <div id="place-status">不在放置回合</div>
+    <div id="turn-actions" class="hidden">
+      <button id="confirm-btn" class="primary">确认放置（0/5）</button>
+      <button id="cancel-btn" class="secondary">取消本轮</button>
+      <button id="remove-selected-btn" class="secondary hidden">移除选中</button>
+    </div>
   </div>
 
   <div class="section">
@@ -40,6 +48,11 @@
   <div class="section">
     <div class="label">颜色</div>
     <div id="colors" class="choices"></div>
+  </div>
+
+  <div class="section hidden" id="block-info-section">
+    <div class="label">方块信息</div>
+    <div id="block-info"></div>
   </div>
 
   <div class="section">
@@ -53,7 +66,8 @@
   </div>
 </div>
 
-<div id="hint">左键拖动旋转 · 滚轮缩放 · 右键拖动平移 · 点击地面或方块表面放置</div>
+<div id="hint">左键拖动旋转 · 滚轮缩放 · 右键拖动平移 · WASD/QE 漫游（Shift 加速）· 左键点击放置 · 右键点自己的待确认方块选中移动</div>
+<div id="block-tip" class="hidden"></div>
 <div id="toast" class="hidden"></div>
 <div id="reconnect" class="hidden">连接已断开，正在重连…（重连后需重新排队）</div>
 
