@@ -2,7 +2,14 @@
 
 多人 3D 体素方块放置应用，同一份业务用多种语言各实现一遍，横向对比。
 
-规约见 [SPEC.md](SPEC.md)：无限大 3D 地图、排队抢放置权、30 秒限时、不许悬空、6 种材质 × 8 种颜色、3D 漫游缩放。
+规约见 [SPEC.md](SPEC.md)：无限大 3D 地图、排队抢放置权、30 秒限时、不许悬空、10 种材质 × 16 种颜色、3D 漫游缩放。
+
+## v3 改动（Java 版已实现）
+
+- 材质 6 → 10 种（新增沙子、雪、金属、树叶），颜色 8 → 16 种。
+- 支持删除已确认方块：每回合删 1 个（`VOXEL_DELETES_PER_TURN` 可配），删完本回合立即结束；删除需模拟校验，不能让别的方块悬空。
+- 只允许浏览器操作：WebSocket 握手需一次性会话令牌（`GET /api/session`）+ 合法 Origin（`VOXEL_ALLOWED_ORIGINS`），直连 API 的脚本会被拒绝。
+- 键盘漫游速度翻倍（基准 24 单位/秒，Shift 3 倍）；初始视角改为俯视约 50°、网格线加深；砖块纹理对比加强；回合结束幽灵预览立即消失。
 
 ## v2 改动（Java 版已实现）
 
@@ -29,7 +36,7 @@ mvn spring-boot:run
 # 打开 http://localhost:8080
 ```
 
-配置（环境变量）：`VOXEL_TURN_SECONDS`（默认 30）、`VOXEL_BLOCKS_PER_TURN`（默认 5）、`VOXEL_PLACERS_MAX`（默认 3）、`VOXEL_QUEUE_MAX_LENGTH`（默认 20）。
+配置（环境变量）：`VOXEL_TURN_SECONDS`（默认 30）、`VOXEL_BLOCKS_PER_TURN`（默认 5）、`VOXEL_DELETES_PER_TURN`（默认 1）、`VOXEL_PLACERS_MAX`（默认 3）、`VOXEL_QUEUE_MAX_LENGTH`（默认 20）、`VOXEL_ALLOWED_ORIGINS`（默认空 = 不校验 Origin，仅本地开发）。
 
 ## 部署
 

@@ -1,6 +1,14 @@
-# 体素方块世界 — 多语言实现对比规约 v2
+# 体素方块世界 — 多语言实现对比规约 v3
 
 同一份业务，用多种语言各实现一遍（先 Java，确认功能后再移植）。本文件是所有语言版本必须遵守的同一份规约，改动规约需同步更新所有已实现版本。
+
+## v3 相对 v2 的改动
+
+- 材质 6 → 10 种，颜色 8 → 16 种。
+- 支持删除已确认方块：每回合最多删 1 个（可配置）；删除后本回合立即结束，不能再放置；删除需模拟校验，不能让别的方块悬空。
+- 只允许浏览器操作：WebSocket 握手必须携带页面会话令牌 + 合法 Origin，直接调 API 的脚本连不上（见「浏览器限制」；注意其能力边界）。
+- 键盘漫游速度翻倍：基准 24 单位/秒，Shift 3 倍。
+- 修掉 v2 实测留下的 3 处小问题：初始视角俯视角度、砖块纹理对比、回合结束幽灵立即消失。
 
 ## v2 相对 v1 的改动
 
@@ -18,11 +26,12 @@
 - 坐标为整数 `(x, y, z)`，x/z 无界，`y >= 0`。地面是 y=0 平面（只渲染网格，不存为方块）。
 - **不许悬空**：放置位置必须满足 `y == 0`（落地面）或 6 邻居（上下左右前后）中至少一个已有方块。服务端强制校验，客户端只做预览提示。
   - 支撑判定中的「已有方块」= 已确认方块 + **自己本轮的待确认方块**。别人本轮的待确认方块只占格子（不能放进同一格），不给别人当支撑——这样超时清理时不会让别人的方块悬空。
+  - 推论：已确认方块集合恒自支撑（每个已确认方块都有 y==0 或一个已确认邻居），因为确认时整批待确认方块同时落定。
 - 目标格已有方块（已确认或任何人的待确认）时不可放置。
-- 材质 6 种：`grass` 草、`dirt` 泥土、`stone` 石头、`wood` 木头、`glass` 玻璃、`brick` 砖块。
-- 颜色 8 种：`red` 红、`orange` 橙、`yellow` 黄、`green` 绿、`blue` 蓝、`purple` 紫、`white` 白、`black` 黑。
+- 材质 10 种：`grass` 草、`dirt` 泥土、`stone` 石头、`wood` 木头、`glass` 玻璃、`brick` 砖块、`sand` 沙子、`snow` 雪、`metal` 金属、`leaves` 树叶。
+- 颜色 16 种：`red` 红、`orange` 橙、`yellow` 黄、`green` 绿、`blue` 蓝、`purple` 紫、`white` 白、`black` 黑、`pink` 粉、`brown` 棕、`cyan` 青、`lime` 酸橙绿、`gold` 金、`silver` 银灰、`darkblue` 深蓝、`darkred` 深红。
 - 材质与颜色都随方块存服务端；另存放置人昵称（确认时刻的快照，之后改昵称不追溯）与放置时间（确认时刻的时间戳）。
-- v2 状态放内存，服务重启世界清零（后续版本再考虑持久化）。
+- v3 状态放内存，服务重启世界清零（后续版本再考虑持久化）。
 
 ### 昵称
 
@@ -42,7 +51,24 @@
 - 取消：持有放置权者发 `cancel`。清除自己本轮全部待确认方块（逐个广播 `block_removed`，reason=cancelled），放置权释放（reason=cancelled），立即发放下一位。
 - 超时：服务端每秒扫一次，过期放置权释放并广播（reason=timeout，附 `cleared` = 清除的待确认数），同时清除该用户本轮全部待确认方块（逐个广播 `block_removed`，reason=timeout），立即发放下一位。
 - 断线：关闭网页/断开连接即离开队列或释放放置权（关闭网页必须重新排队），并清除该用户本轮全部待确认方块（reason=disconnect），立即发放下一位。
-- 所有人（含观看者）实时收到：落块（待确认/确认/移动/移除）、队列变化、放置权发放/释放、倒计时、昵称变更。
+- 所有人（含观看者）实时收到：落块（待确认/确认/移动/移除/删除）、队列变化、放置权发放/释放、倒计时、昵称变更。
+
+### 删除（v3 新增）
+
+- 持有放置权者发 `delete`（x, y, z），删除一个**已确认**方块。可删任何人的已确认方块（包括自己的）；删除是公开操作，全员收到 `block_deleted`（含删除人昵称）。
+- 校验顺序：①仍持有未过期放置权（否则 `not_your_turn`）②目标必须是已确认方块——目标是待确认方块时回 `not_confirmed`（删待确认方块请用 `remove`），目标格为空时回 `no_such_block` ③本轮已删除数 < `turn.deletes-per-turn`（满了回 `delete_quota_exceeded`）④模拟删除：删除后每个剩下的已确认方块仍须有支撑（y==0 或邻居在剩下的已确认集合中），且删除后仍存在的每个待确认方块（任何人的）仍须有支撑；否则回 `would_float`，删除不生效、回合继续。
+  - 模拟时「删除后仍存在的待确认方块」：别人的待确认方块全部计入；自己的待确认方块只在回合会继续时计入（即本次删除后删除数仍未达上限时）；默认配置（每回合删 1 个）下删除即结束回合，自己的待确认方块会被清除，因此不计入模拟。
+- 删除生效后：目标方块从已确认集合移除，广播 `block_deleted`；本轮删除数 +1；删除数达到 `turn.deletes-per-turn` 时本回合**立即结束**：清除自己本轮全部待确认方块（逐个广播 `block_removed`，reason=deleted），放置权释放（reason=deleted，附 `cleared` = 清除的待确认数），立即发放下一位。默认配置下删 1 个即结束，删完不能再放置任何方块。
+- 删除被 `would_float` 等错误拒绝时，回合继续，放置权与待确认方块都不变。
+
+### 浏览器限制（v3 新增）
+
+- 目标：放置/移动/移除/删除/确认等操作只能从浏览器发起，直接用脚本调 WebSocket API 连不上。
+- 机制（两道关，都在 WebSocket 握手时校验，不通过则拒绝握手）：
+  1. **会话令牌**：浏览器加载页面后先调 `GET /api/session` 拿一个令牌，再用 `/ws?token=<令牌>` 连接。令牌由服务端随机生成，一次性使用（握手成功即消费，第二次用同一令牌连不上），有效期 5 分钟。重连时先重新拿令牌。
+  2. **Origin 校验**：握手请求的 `Origin` 头必须在允许列表 `voxel.allowed-origins` 内（逗号分隔）；缺失或不在列表内则拒绝。允许列表为空时不校验（仅供本地开发；生产部署必须配置为页面的实际来源，如 `https://18443-....instabox.tech`）。
+- 只读接口 `GET /api/state`、`GET /api/config` 不设限（公开查看是功能的一部分）。
+- **能力边界（必须如实说明）**：这两道关拦得住随手写的直连脚本和跨站页面，拦不住有心人——任何人都能先请求页面/会话接口拿到令牌、再伪造 Origin 头。真正的浏览器身份鉴别需要验证码类服务，不在本规约范围内。
 
 ### 配置（环境变量/配置文件，改配置重启生效）
 
@@ -50,10 +76,12 @@
 | --- | --- | --- |
 | `turn.seconds` | 30 | 持有放置权后限时秒数 |
 | `turn.blocks-per-turn` | 5 | 一回合最多连续放置的方块数（待确认计数） |
+| `turn.deletes-per-turn` | 1 | 一回合最多删除的已确认方块数；删满立即结束回合 |
 | `placers.max` | 3 | 同时持有放置权的人数 |
 | `queue.max-length` | 20 | 排队队列最大长度（等待人数），满了拒绝入队 |
+| `voxel.allowed-origins` | （空） | WebSocket 握手允许的 Origin 列表，逗号分隔；为空时不校验 Origin（仅本地开发）；生产部署填页面来源 |
 
-### 协议（WebSocket，JSON，端点 `/ws`）
+### 协议（WebSocket，JSON，端点 `/ws?token=<会话令牌>`）
 
 客户端 → 服务端：
 
@@ -64,6 +92,7 @@
 | `place` | `x, y, z, material, color` | 放置一个待确认方块 |
 | `move` | `from: {x,y,z}, to: {x,y,z}` | 移动自己本轮的待确认方块 |
 | `remove` | `x, y, z` | 移除自己本轮的待确认方块 |
+| `delete` | `x, y, z` | 删除一个已确认方块（删满上限立即结束回合） |
 | `confirm` | — | 确认本轮全部待确认方块并结束回合 |
 | `cancel` | — | 清除本轮待确认方块并放弃回合 |
 | `rename` | `nickname` | 修改自己的昵称 |
@@ -75,35 +104,41 @@
 | `init` | `blocks: [{x,y,z,material,color,by,placedAt,pending,byId}]`、`config`、`me: {clientId, nickname, state}`、`online` | 连接后全量同步一次；待确认方块 `pending=true`、`placedAt=null` |
 | `block_placed` | `x, y, z, material, color, by, byId, pending: true` | 有人放下待确认方块 |
 | `block_moved` | `from: {x,y,z}, to: {x,y,z}, by, byId` | 待确认方块被移动 |
-| `block_removed` | `x, y, z, reason: removed \| timeout \| cancelled \| disconnect` | 待确认方块被清除 |
+| `block_removed` | `x, y, z, reason: removed \| timeout \| cancelled \| disconnect \| deleted` | 待确认方块被清除 |
+| `block_deleted` | `x, y, z, by, byId` | 已确认方块被删除 |
 | `blocks_confirmed` | `blocks: [{x,y,z,material,color,by,placedAt}]` | 一批待确认方块正式落定 |
 | `queue_state` | `waiting: [{clientId, nickname}]`、`placing: [{clientId, nickname, deadline, pendingCount}]`、`online` | 队列/放置权变化时广播 |
-| `turn_granted` | `deadline, blocksPerTurn` | 发给获得放置权者 |
-| `turn_released` | `reason: confirmed \| timeout \| cancelled \| disconnect, cleared?` | 放置权释放；`cleared` 为本次清除的待确认数（>0 时附带） |
+| `turn_granted` | `deadline, blocksPerTurn, deletesPerTurn` | 发给获得放置权者 |
+| `turn_released` | `reason: confirmed \| timeout \| cancelled \| disconnect \| deleted, cleared?` | 放置权释放；`cleared` 为本次清除的待确认数（>0 时附带） |
 | `renamed` | `clientId, nickname` | 有人改了昵称（同时会跟一条 queue_state） |
 | `error` | `code, message` | 见下 |
 | `countdown` | `placing: [{clientId, nickname, secondsLeft, pendingCount}]` | 每秒广播一次 |
 
-错误码：`queue_full` / `not_your_turn` / `cell_occupied` / `floating` / `bad_block` / `quota_exceeded`（本轮已放满）/ `not_pending_owner`（动别人的待确认方块）/ `no_such_block`（目标不是待确认方块）/ `would_float`（移动/移除后会有方块悬空）/ `name_taken` / `name_invalid`。
+错误码：`queue_full` / `not_your_turn` / `cell_occupied` / `floating` / `bad_block` / `quota_exceeded`（本轮已放满）/ `not_pending_owner`（动别人的待确认方块）/ `no_such_block`（目标不是待确认方块，或删除目标格为空）/ `would_float`（移动/移除/删除后会有方块悬空）/ `not_confirmed`（删除目标是待确认方块）/ `delete_quota_exceeded`（本轮删除次数已用完）/ `name_taken` / `name_invalid`。
 
-REST（调试/兜底）：`GET /api/state` 返回方块全量（含 by/placedAt/pending）+ 队列快照 + 配置；`GET /api/config` 返回配置（含 blocksPerTurn）。
+REST（调试/兜底）：`GET /api/state` 返回方块全量（含 by/placedAt/pending）+ 队列快照 + 配置；`GET /api/config` 返回配置（含 blocksPerTurn、deletesPerTurn）；`GET /api/session` 返回 `{"token": "..."}`（一次性会话令牌，有效期 5 分钟）。
 
 ### 前端
 
 - Three.js 渲染：地面网格、已放方块、待确认方块（与已确认有明显视觉区分：半透明 + 橙色描边；自己的待确认方块描边会呼吸/脉冲）、幽灵预览块。
 - **网格对齐**：方块中心在格子正中央（坐标 x 的方块中心在 x+0.5），落在网格格子里，不压网格线；幽灵预览同样。
-- **材质必须肉眼可区分**：每种材质有自己的程序化纹理（草：顶部草绿斑点、侧面泥土带草皮边；泥土：棕色噪点；石头：灰色噪点加裂纹；木头：竖纹木板；玻璃：淡蓝半透明加边框；砖块：砖缝）。纹理以明度图案为主，颜色以乘色方式叠加——换材质和换颜色都要看得出变化。
+- **材质必须肉眼可区分**：每种材质有自己的程序化纹理（草：顶部草绿斑点、侧面泥土带草皮边；泥土：棕色噪点；石头：灰色噪点加裂纹；木头：竖纹木板；玻璃：淡蓝半透明加边框；砖块：深灰浆 + 红棕砖面 + 4px 砖缝 + 每块砖顶高光底阴影；沙子：细密浅黄颗粒，比泥土更细；雪：近白底 + 零星淡蓝闪点；金属：横向拉丝条纹 + 深色接缝；树叶：深绿团簇斑块）。纹理以明度图案为主，颜色以乘色方式叠加——换材质和换颜色都要看得出变化。
 - **预览实时**：幽灵预览用当前选的材质纹理 + 颜色（半透明）；切换材质/颜色后预览立即变化，无需重新移动鼠标。
-- **可否放置一眼区分**：幽灵预览带彩色描边（可放=绿色、不可放=红色）+ 屏幕上常驻一行状态文字（「可放置」/「不可放置：已有方块」/「不可放置：不能悬空」/「不在放置回合」等原因）。非放置回合不显示放置预览。
-- 漫游：OrbitControls（左键拖动旋转、滚轮缩放、右键拖动平移）+ 键盘漫游（W/A/S/D 前后左右、Q/E 下降/上升，Shift 加速；方向键平移视角）+ 重置视角按钮。点击与拖动用位移阈值区分（拖动不触发放置）。
+- **可否放置一眼区分**：幽灵预览带彩色描边（可放=绿色、不可放=红色）+ 屏幕上常驻一行状态文字（「可放置」/「不可放置：已有方块」/「不可放置：不能悬空」/「不在放置回合」等原因）。非放置回合不显示放置预览；**回合一结束幽灵立即消失，不等鼠标移动**。
+- 漫游：OrbitControls（左键拖动旋转、滚轮缩放、右键拖动平移）+ 键盘漫游（W/A/S/D 前后左右、Q/E 下降/上升，Shift 加速；方向键平移视角）+ 重置视角按钮。点击与拖动用位移阈值区分（拖动不触发放置）。键盘漫游基准速度 **24 单位/秒，Shift 3 倍（72 单位/秒）**。
+- **初始视角**：打开页面即俯视角度，能看清地面网格（相机约 (12, 20, 12)，目标 (0, 1, 0)，俯仰角约 50°）；地面网格线颜色足够深，与背景有明显对比。重置视角回到同一位置。
 - 选格：射线拾取，点已有方块的某个面则瞄准该面外侧相邻格；点地面则瞄准地面格。
 - 本轮操作（仅放置回合可见）：「确认放置（n/5）」主按钮、「取消本轮」按钮；右键点（触屏长按）自己本轮的待确认方块可选中（高亮），再左键点目标格移动它，选中时可点「移除选中」删除；Esc、右键点空处或再次右键点它取消选中。左键永远是放置/移动（这样才能点自己待确认方块的顶面往上叠）。放满 5 个时明确提示「已放满，请确认」。
+- **删除操作（v3 新增，仅放置回合可见）**：「删除方块」按钮。点后进入删除模式：状态栏提示「删除模式：点击一个已确认方块删除，删除后本回合立即结束」，幽灵预览隐藏；点一个已确认方块时弹确认框（若自己还有待确认方块，确认框里说明删除后它们会被清除），确认后发 `delete`；Esc 或再点按钮退出删除模式。收到 `block_deleted` / 回合结束时自动退出删除模式。删除成功后 Toast 提示「已删除 1 个方块，本回合结束」（有待确认被清除时一并说明清除了几个）。
 - 超时提醒：倒计时 ≤10 秒时倒计时条变红并脉冲，旁边常驻提醒「还剩 X 秒，超时未确认将清除本次放置的 N 个方块」；超时清除后用 Toast 明确告知清除了几个。
 - 方块信息：悬停任意方块显示浮动标签（已确认：放置人昵称 + 放置时间 + 材质/颜色；待确认：「待确认 · 放置人昵称」）；观看/排队状态下点击已确认方块，在面板里固定显示该方块的完整信息（放置人、放置时间、材质、颜色、坐标）。
 - 昵称：顶栏显示自己的昵称，点击可修改（输入框，非法/重名时 Toast 提示）；排队与放置者名单显示昵称。
-- 面板：材质选择（6）、颜色选择（8）、排队按钮/当前位置、倒计时条、在线人数、当前放置者名单（含每人本轮已放 n/5）。
+- 面板：材质选择（10）、颜色选择（16）、排队按钮/当前位置、倒计时条、在线人数、当前放置者名单（含每人本轮已放 n/5）。
+- 连接：页面加载后先调 `GET /api/session` 拿令牌，再连 WebSocket（`/ws?token=<令牌>`）；断线重连时先重新拿令牌。握手被拒时 Toast 提示「连接被拒绝，请刷新页面重试」，不再静默重连。
 - WebSocket 地址由页面 URL 推导（兼容 `/` 与 `/voxel/` 等子路径部署，https 下用 wss）。
 
-## Java 版技术选型（v2）
+## Java 版技术选型（v3）
 
 Spring Boot 3.3 + Java 17，`spring-boot-starter-web` + `spring-boot-starter-websocket`（原生 WebSocket Handler，不用 STOMP，保持协议可移植）。前端静态文件放 `src/main/resources/static`，Three.js 本地 vendor（不依赖 CDN）。单 jar，Docker 多阶段构建，部署到 K3s，网关子路径接入。
+
+v3 新增：会话令牌服务（内存 Map，令牌随机生成、一次性、5 分钟过期、容量上限约 1000，顺带清理过期条目）+ `GET /api/session` 接口 + WebSocket 握手拦截器（校验令牌与 Origin，不通过拒绝握手；`setAllowedOrigins` 与配置的允许列表保持一致，列表为空时放开）。

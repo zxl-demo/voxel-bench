@@ -1,20 +1,24 @@
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/OrbitControls.js';
 
-// ---- constants (SPEC v2) ----
+// ---- constants (SPEC v3) ----
 const MATERIALS = [
   ['grass', '草'], ['dirt', '泥土'], ['stone', '石头'],
   ['wood', '木头'], ['glass', '玻璃'], ['brick', '砖块'],
+  ['sand', '沙子'], ['snow', '雪'], ['metal', '金属'], ['leaves', '树叶'],
 ];
 const COLORS = [
   ['red', '红', 0xe53935], ['orange', '橙', 0xfb8c00], ['yellow', '黄', 0xfdd835],
   ['green', '绿', 0x43a047], ['blue', '蓝', 0x1e88e5], ['purple', '紫', 0x8e24aa],
   ['white', '白', 0xf5f5f5], ['black', '黑', 0x212121],
+  ['pink', '粉', 0xf06292], ['brown', '棕', 0x8d6e63], ['cyan', '青', 0x00acc1],
+  ['lime', '酸橙绿', 0x9ccc65], ['gold', '金', 0xffb300], ['silver', '银灰', 0xbdbdbd],
+  ['darkblue', '深蓝', 0x1565c0], ['darkred', '深红', 0xb71c1c],
 ];
 const COLOR_HEX = Object.fromEntries(COLORS.map(([id, , hex]) => [id, hex]));
 const MATERIAL_NAME = Object.fromEntries(MATERIALS.map(([id, name]) => [id, name]));
 const COLOR_NAME = Object.fromEntries(COLORS.map(([id, name]) => [id, name]));
-const MATERIAL_ROUGHNESS = { grass: 0.9, dirt: 1.0, stone: 0.95, wood: 0.8, glass: 0.15, brick: 0.9 };
+const MATERIAL_ROUGHNESS = { grass: 0.9, dirt: 1.0, stone: 0.95, wood: 0.8, glass: 0.15, brick: 0.9, sand: 1.0, snow: 0.9, metal: 0.35, leaves: 1.0 };
 
 // ---- state ----
 let ws = null;
@@ -24,6 +28,7 @@ let myState = 'watching'; // watching | queued | placing
 let myDeadline = 0;
 let turnSeconds = 30;
 let blocksPerTurn = 5;
+let deletesPerTurn = 1;
 let placersMax = 3;
 let queueMaxLength = 20;
 let selMaterial = 'grass';
@@ -36,7 +41,10 @@ let myPendingCount = 0;
 let secondsLeftMap = new Map(); // clientId -> secondsLeft (from countdown)
 let nicknames = new Map(); // clientId -> nickname
 let selectedKey = null; // key of the selected own pending block, or null
+let deleteMode = false; // delete mode: left-click a confirmed block to delete it
 let reconnectTimer = null;
+let gotInit = false; // current connection received init (handshake fully succeeded)
+let handshakeFailed = false; // onerror fired before init: handshake refused
 
 // ---- procedural textures (luminance patterns; color is multiplied in) ----
 const textureCache = new Map();
@@ -135,15 +143,57 @@ function textureFor(material, face) {
       });
     case 'brick:flat':
       return canvasTexture(key, (ctx) => {
-        ctx.fillStyle = '#ece5e0'; ctx.fillRect(0, 0, 128, 128); // mortar
+        ctx.fillStyle = '#8d7d74'; ctx.fillRect(0, 0, 128, 128); // mortar (dark, survives color tint)
         const bh = 16, bw = 32;
+        const tones = ['#d7a08f', '#c98d7c', '#e0b3a2', '#bd7f6e'];
         for (let row = 0; row < 8; row++) {
           const off = (row % 2) * (bw / 2);
           for (let col = -1; col < 5; col++) {
-            ctx.fillStyle = ['#e6cfc8', '#dfc4ba', '#ecd9d2'][(Math.random() * 3) | 0];
-            ctx.fillRect(col * bw + off + 1, row * bh + 1, bw - 2, bh - 2);
+            const x = col * bw + off + 2, y = row * bh + 2;
+            ctx.fillStyle = tones[(Math.random() * tones.length) | 0];
+            ctx.fillRect(x, y, bw - 4, bh - 4);
+            ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(x, y, bw - 4, 2); // top highlight
+            ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fillRect(x, y + bh - 6, bw - 4, 2); // bottom shade
           }
         }
+      });
+    case 'sand:flat':
+      return canvasTexture(key, (ctx) => {
+        ctx.fillStyle = '#f5ecd7'; ctx.fillRect(0, 0, 128, 128);
+        // finer grains than dirt
+        speckle(ctx, ['#e8dcc0', '#dccfa8', '#f9f3e2'], 1600, 2);
+      });
+    case 'snow:flat':
+      return canvasTexture(key, (ctx) => {
+        ctx.fillStyle = '#f7fafc'; ctx.fillRect(0, 0, 128, 128);
+        // sparse pale-blue glints on a near-white base
+        speckle(ctx, ['#e3f2fd', '#bbdefb', '#ffffff'], 120, 3);
+      });
+    case 'metal:flat':
+      return canvasTexture(key, (ctx) => {
+        ctx.fillStyle = '#e8e8e8'; ctx.fillRect(0, 0, 128, 128);
+        // horizontal brushed lines
+        for (let y = 0; y < 128; y += 2) {
+          ctx.fillStyle = (y / 2) % 2 ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.25)';
+          ctx.fillRect(0, y, 128, 1);
+        }
+        // dark seams
+        ctx.fillStyle = '#616161';
+        ctx.fillRect(0, 42, 128, 2);
+        ctx.fillRect(0, 86, 128, 2);
+      });
+    case 'leaves:flat':
+      return canvasTexture(key, (ctx) => {
+        ctx.fillStyle = '#c8e6c9'; ctx.fillRect(0, 0, 128, 128);
+        // dark-green clusters
+        for (let i = 0; i < 26; i++) {
+          ctx.fillStyle = ['#81c784', '#66bb6a', '#a5d6a7'][(Math.random() * 3) | 0];
+          ctx.beginPath();
+          ctx.ellipse(Math.random() * 128, Math.random() * 128,
+            10 + Math.random() * 12, 8 + Math.random() * 10, Math.random() * Math.PI, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        speckle(ctx, ['#2e7d32', '#43a047'], 200, 3);
       });
     default:
       return canvasTexture(key, (ctx) => {
@@ -159,7 +209,7 @@ scene.background = new THREE.Color(0xdfe9f2);
 scene.fog = new THREE.Fog(0xdfe9f2, 90, 260);
 
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 1000);
-const HOME_POS = new THREE.Vector3(14, 12, 14);
+const HOME_POS = new THREE.Vector3(12, 20, 12);
 const HOME_TARGET = new THREE.Vector3(0, 1, 0);
 camera.position.copy(HOME_POS);
 
@@ -180,7 +230,7 @@ const sun = new THREE.DirectionalLight(0xffffff, 1.4);
 sun.position.set(10, 24, 12);
 scene.add(sun);
 
-const grid = new THREE.GridHelper(400, 400, 0x90a4ae, 0xc5d3dc);
+const grid = new THREE.GridHelper(400, 400, 0x546e7a, 0x90a4ae);
 grid.position.y = 0;
 scene.add(grid);
 
@@ -362,7 +412,7 @@ function doPick(clientX, clientY) {
 
 function updateGhostFromPick(pick) {
   ghostTarget = pick ? pick.target : null;
-  if (myState !== 'placing' || !pick) {
+  if (myState !== 'placing' || deleteMode || !pick) {
     ghost.visible = false;
     ghostValid = false;
     updatePlaceStatus();
@@ -422,7 +472,7 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
     clearTimeout(longPressTimer);
     longPressTimer = setTimeout(() => {
       longPressTimer = null;
-      if (myState === 'placing') {
+      if (myState === 'placing' && !deleteMode) {
         handleSelectClick(doPick(e.clientX, e.clientY));
         suppressClick = true;
       }
@@ -450,14 +500,19 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   if (dx * dx + dy * dy > 36) return; // it was a drag, not a click
   if (suppressClick) { suppressClick = false; return; } // was a long-press select
   if (e.button === 2) {
-    // right-click: select/deselect own pending block (placing only)
-    if (myState === 'placing') handleSelectClick(doPick(e.clientX, e.clientY));
+    // right-click: exit delete mode, or select/deselect own pending block (placing only)
+    if (myState === 'placing') {
+      if (deleteMode) exitDeleteMode();
+      else handleSelectClick(doPick(e.clientX, e.clientY));
+    }
     return;
   }
-  if (e.button !== 0) return; // only left clicks place / show info
+  if (e.button !== 0) return; // only left clicks place / delete / show info
   const pick = doPick(e.clientX, e.clientY);
-  if (myState === 'placing') handlePlacingClick(pick);
-  else handleWatchClick(pick);
+  if (myState === 'placing') {
+    if (deleteMode) handleDeleteClick(pick);
+    else handlePlacingClick(pick);
+  } else handleWatchClick(pick);
 });
 
 // right-click (or touch long-press): toggle selection of own pending block.
@@ -505,13 +560,29 @@ function handleWatchClick(pick) {
   else hideBlockInfo();
 }
 
+// delete mode: left-click a confirmed block to delete it (with a confirm
+// dialog). Clicking empty space / ground / a pending block does nothing.
+function handleDeleteClick(pick) {
+  const hit = pick ? pick.hitMesh : null;
+  if (!hit || hit.userData.pending) return;
+  const c = hit.userData.coord;
+  const who = hit.userData.by ? `（放置人：${hit.userData.by}）` : '';
+  const warn = myPendingCount > 0
+    ? `\n删除后本回合立即结束，你本轮的 ${myPendingCount} 个待确认方块会被清除。`
+    : '\n删除后本回合立即结束。';
+  if (!confirm(`确认删除 (${c.x}, ${c.y}, ${c.z}) 的方块吗？${who}${warn}`)) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'delete', x: c.x, y: c.y, z: c.z }));
+  }
+}
+
 // ---- keyboard roaming (WASD + Q/E, Shift = 3x) ----
 const keys = new Set();
 addEventListener('keydown', (e) => {
   if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
   const k = e.key.toLowerCase();
   if (['w', 'a', 's', 'd', 'q', 'e', 'shift'].includes(k)) keys.add(k);
-  if (e.key === 'Escape') clearSelection();
+  if (e.key === 'Escape') { clearSelection(); exitDeleteMode(); }
 });
 addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
 
@@ -534,7 +605,7 @@ function updateKeys(dt) {
   if (keys.has('e')) _move.y += 1;
   if (keys.has('q')) _move.y -= 1;
   if (_move.lengthSq() === 0) return;
-  _move.normalize().multiplyScalar((keys.has('shift') ? 36 : 12) * dt);
+  _move.normalize().multiplyScalar((keys.has('shift') ? 72 : 24) * dt);
   camera.position.add(_move);
   controls.target.add(_move);
 }
@@ -628,6 +699,12 @@ $('remove-selected-btn').onclick = () => {
   const c = mesh.userData.coord;
   ws.send(JSON.stringify({ type: 'remove', x: c.x, y: c.y, z: c.z }));
 };
+const deleteBtn = $('delete-btn');
+deleteBtn.onclick = () => {
+  if (myState !== 'placing') return;
+  if (deleteMode) exitDeleteMode();
+  else enterDeleteMode();
+};
 $('reset-view-btn').onclick = () => {
   camera.position.copy(HOME_POS);
   controls.target.copy(HOME_TARGET);
@@ -690,6 +767,24 @@ function clearSelection() {
   }
 }
 
+function enterDeleteMode() {
+  deleteMode = true;
+  clearSelection();
+  ghost.visible = false;
+  ghostTarget = null;
+  deleteBtn.textContent = '退出删除模式';
+  deleteBtn.style.background = '#ffcdd2';
+  updatePlaceStatus();
+}
+
+function exitDeleteMode() {
+  if (!deleteMode) return;
+  deleteMode = false;
+  deleteBtn.textContent = '删除方块';
+  deleteBtn.style.background = '';
+  updatePlaceStatus();
+}
+
 function showBlockInfo(u) {
   $('block-info').innerHTML =
     `<div><span>放置人</span>${u.by || '?'}</div>` +
@@ -715,6 +810,7 @@ function showToast(msg) {
 function updatePlaceStatus() {
   const el = $('place-status');
   if (myState !== 'placing') { el.textContent = '不在放置回合'; el.className = ''; return; }
+  if (deleteMode) { el.textContent = '删除模式：点击一个已确认方块删除，删除后本回合立即结束'; el.className = 'bad'; return; }
   if (selectedKey) { el.textContent = '已选中：左键点目标格移动它（Esc 或右键取消）'; el.className = 'good'; return; }
   if (myPendingCount >= blocksPerTurn) { el.textContent = '本轮已放满'; el.className = 'bad'; return; }
   if (!ghostTarget) { el.textContent = '将鼠标移到地面或方块上'; el.className = ''; return; }
@@ -728,6 +824,13 @@ function updatePlaceStatus() {
 }
 
 function renderState() {
+  // the ghost only exists while placing: hide it the moment the turn ends
+  // (renderState runs on every state change, pointermove never touches it)
+  if (myState !== 'placing') {
+    ghost.visible = false;
+    ghostTarget = null;
+    exitDeleteMode();
+  }
   statusText.classList.remove('placing', 'queued');
   if (myState === 'placing') {
     statusText.textContent = '轮到你放置！';
@@ -812,8 +915,30 @@ function wsUrl() {
   return proto + '//' + location.host + base + 'ws';
 }
 
-function connect() {
-  ws = new WebSocket(wsUrl());
+function apiUrl(path) {
+  let base = location.pathname.replace(/[^/]*$/, '');
+  if (!base.endsWith('/')) base += '/';
+  return base + path;
+}
+
+async function connect() {
+  gotInit = false;
+  handshakeFailed = false;
+  // SPEC v3: fetch a one-time session token first, then connect with it.
+  // Reconnects fetch a fresh token (each token is single-use).
+  let token;
+  try {
+    const res = await fetch(apiUrl('api/session'));
+    if (!res.ok) throw new Error('session ' + res.status);
+    token = (await res.json()).token;
+  } catch {
+    // session endpoint unreachable (server down?): retry like a normal reconnect
+    $('reconnect').classList.remove('hidden');
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 2000);
+    return;
+  }
+  ws = new WebSocket(wsUrl() + '?token=' + encodeURIComponent(token));
   ws.onopen = () => {
     $('reconnect').classList.add('hidden');
   };
@@ -822,11 +947,13 @@ function connect() {
     try { msg = JSON.parse(ev.data); } catch { return; }
     switch (msg.type) {
       case 'init': {
+        gotInit = true;
         myId = msg.me.clientId;
         myNickname = msg.me.nickname;
         nickSpan.textContent = myNickname;
         turnSeconds = msg.config.turnSeconds;
         blocksPerTurn = msg.config.blocksPerTurn ?? 5;
+        deletesPerTurn = msg.config.deletesPerTurn ?? 1;
         placersMax = msg.config.placersMax;
         queueMaxLength = msg.config.queueMaxLength;
         myState = msg.me.state;
@@ -844,6 +971,10 @@ function connect() {
         break;
       case 'block_removed':
         removeBlock(msg.x, msg.y, msg.z);
+        break;
+      case 'block_deleted':
+        removeBlock(msg.x, msg.y, msg.z);
+        if (msg.byId === myId) exitDeleteMode(); // only my own delete ends delete mode
         break;
       case 'blocks_confirmed':
         for (const b of msg.blocks) confirmBlock(b);
@@ -875,8 +1006,10 @@ function connect() {
         myState = 'placing';
         myDeadline = msg.deadline;
         blocksPerTurn = msg.blocksPerTurn ?? blocksPerTurn;
+        deletesPerTurn = msg.deletesPerTurn ?? deletesPerTurn;
         myPendingCount = 0;
         clearSelection();
+        exitDeleteMode();
         renderState();
         break;
       case 'turn_released': {
@@ -884,10 +1017,15 @@ function connect() {
         myDeadline = 0;
         myPendingCount = 0;
         clearSelection();
+        exitDeleteMode();
         if (msg.reason === 'timeout') {
           showToast(msg.cleared > 0
             ? `放置超时，本次放置的 ${msg.cleared} 个方块已清除`
             : '放置超时，放置权已释放');
+        } else if (msg.reason === 'deleted') {
+          showToast(msg.cleared > 0
+            ? `已删除 1 个方块，本回合结束（另清除了 ${msg.cleared} 个待确认方块）`
+            : '已删除 1 个方块，本回合结束');
         }
         renderState();
         break;
@@ -927,11 +1065,20 @@ function connect() {
     myPendingCount = 0;
     selectedKey = null;
     renderState();
+    if (!gotInit || handshakeFailed) {
+      // handshake refused (bad token / Origin): tell the user, no silent reconnect
+      showToast('连接被拒绝，请刷新页面重试');
+      $('reconnect').classList.add('hidden');
+      return;
+    }
     $('reconnect').classList.remove('hidden');
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, 2000);
   };
-  ws.onerror = () => { try { ws.close(); } catch {} };
+  ws.onerror = () => {
+    if (!gotInit) handshakeFailed = true;
+    try { ws.close(); } catch {}
+  };
 }
 
 connect();

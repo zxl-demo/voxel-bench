@@ -19,7 +19,7 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * In-memory world state + queue/turn rules (SPEC v2).
+ * In-memory world state + queue/turn rules (SPEC v3).
  *
  * <p>All methods are synchronized; they return outbound messages instead of
  * sending them, so no I/O happens while the lock is held. A null target
@@ -30,14 +30,20 @@ import java.util.concurrent.ThreadLocalRandom;
  * timeout / cancel / disconnect clears them). A pending block only supports
  * its own owner's blocks, so a timeout cleanup can never strand someone
  * else's block in mid-air.
+ *
+ * <p>v3 adds {@link #delete}: removing a confirmed block, simulated first so
+ * no remaining block (confirmed or still-existing pending) is left floating.
+ * Deleting up to the per-turn limit ends the turn at once.
  */
 @Service
 public class VoxelWorld {
 
     public static final Set<String> MATERIALS =
-            Set.of("grass", "dirt", "stone", "wood", "glass", "brick");
+            Set.of("grass", "dirt", "stone", "wood", "glass", "brick",
+                    "sand", "snow", "metal", "leaves");
     public static final Set<String> COLORS =
-            Set.of("red", "orange", "yellow", "green", "blue", "purple", "white", "black");
+            Set.of("red", "orange", "yellow", "green", "blue", "purple", "white", "black",
+                    "pink", "brown", "cyan", "lime", "gold", "silver", "darkblue", "darkred");
 
     private static final String[] NICK_ADJECTIVES = {
             "快乐", "闪亮", "硬核", "安静", "飞翔", "迷糊", "勇敢", "温柔", "机灵", "淡定"};
@@ -63,6 +69,7 @@ public class VoxelWorld {
     private final Set<String> connected = new HashSet<>();
     private final Deque<String> queue = new ArrayDeque<>();
     private final Map<String, Long> placing = new HashMap<>(); // clientId -> deadline epoch millis
+    private final Map<String, Integer> deletesUsed = new HashMap<>(); // clientId -> deletes used this turn
 
     public VoxelWorld(VoxelProperties props) {
         this.props = props;
@@ -82,6 +89,7 @@ public class VoxelWorld {
         connected.remove(clientId);
         queue.remove(clientId);
         nicknames.remove(clientId);
+        deletesUsed.remove(clientId);
         List<Outbound> out = new ArrayList<>();
         if (placing.remove(clientId) != null) {
             out.addAll(clearPendingLocked(clientId, "disconnect"));
@@ -242,6 +250,51 @@ public class VoxelWorld {
                 Outbound.all(queueStateJson()));
     }
 
+    /**
+     * Delete a confirmed block (anyone's). Checks, in SPEC order: live turn,
+     * target is confirmed (pending -> not_confirmed, empty -> no_such_block),
+     * per-turn delete quota, then a simulation: no remaining confirmed block
+     * and no still-existing pending block may be left floating. On success
+     * the block is removed and block_deleted is broadcast; reaching the
+     * delete quota ends the turn at once (own pending cleared, reason
+     * "deleted"). A rejected delete leaves the turn untouched.
+     */
+    public synchronized List<Outbound> delete(String clientId, int x, int y, int z) {
+        List<Outbound> err = requireLiveTurn(clientId);
+        if (err != null) {
+            return err;
+        }
+        Coord coord = new Coord(x, y, z);
+        if (pending.containsKey(coord)) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("not_confirmed", "待确认方块请用移除，删除只针对已确认方块")));
+        }
+        if (!blocks.containsKey(coord)) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("no_such_block", "该位置没有已确认方块")));
+        }
+        int used = deletesUsed.getOrDefault(clientId, 0);
+        if (used >= props.getDeletesPerTurn()) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("delete_quota_exceeded", "本轮删除次数已用完")));
+        }
+        boolean turnEnds = used + 1 >= props.getDeletesPerTurn();
+        if (!deleteKeepsSupported(coord, clientId, turnEnds)) {
+            return List.of(Outbound.to(clientId,
+                    errorJson("would_float", "删除后会有方块悬空")));
+        }
+        blocks.remove(coord);
+        deletesUsed.put(clientId, used + 1);
+        List<Outbound> out = new ArrayList<>();
+        out.add(Outbound.all(blockDeletedJson(coord, clientId)));
+        if (turnEnds) {
+            out.addAll(releaseTurnLocked(clientId, "deleted", true));
+        } else {
+            out.add(Outbound.all(queueStateJson()));
+        }
+        return out;
+    }
+
     /** Confirm all own pending blocks, then release the turn. */
     public synchronized List<Outbound> confirm(String clientId) {
         List<Outbound> err = requireLiveTurn(clientId);
@@ -288,6 +341,7 @@ public class VoxelWorld {
         if (!expired.isEmpty()) {
             for (String id : expired) {
                 placing.remove(id);
+                deletesUsed.remove(id);
                 List<Outbound> cleared = clearPendingLocked(id, "timeout");
                 out.addAll(cleared);
                 out.add(Outbound.to(id, turnReleasedJson("timeout", cleared.size())));
@@ -322,6 +376,7 @@ public class VoxelWorld {
         Map<String, Object> cfg = new LinkedHashMap<>();
         cfg.put("turnSeconds", props.getTurnSeconds());
         cfg.put("blocksPerTurn", props.getBlocksPerTurn());
+        cfg.put("deletesPerTurn", props.getDeletesPerTurn());
         cfg.put("placersMax", props.getPlacersMax());
         cfg.put("queueMaxLength", props.getQueueMaxLength());
         return cfg;
@@ -337,6 +392,7 @@ public class VoxelWorld {
             String id = queue.removeFirst();
             long deadline = System.currentTimeMillis() + props.getTurnSeconds() * 1000L;
             placing.put(id, deadline);
+            deletesUsed.put(id, 0); // fresh per-turn delete quota
             out.add(Outbound.to(id, turnGrantedJson(deadline)));
             grantedAny = true;
         }
@@ -355,6 +411,7 @@ public class VoxelWorld {
     private List<Outbound> releaseTurnLocked(String clientId, String reason, boolean notifyClient) {
         List<Outbound> out = new ArrayList<>();
         placing.remove(clientId);
+        deletesUsed.remove(clientId);
         List<Outbound> cleared = clearPendingLocked(clientId, reason);
         out.addAll(cleared);
         if (notifyClient) {
@@ -447,6 +504,63 @@ public class VoxelWorld {
             }
             if (!ok) {
                 return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Simulate deleting one confirmed block: every remaining confirmed block
+     * must stay supported (y == 0 or a neighbor in the remaining confirmed
+     * set), and every pending block that will still exist afterwards must
+     * stay supported too (by the remaining confirmed set or its own owner's
+     * pending set — pending blocks never support another owner's blocks).
+     * The deleter's own pending blocks are excluded when the turn ends with
+     * this delete (they get cleared along with the turn, so they cannot be
+     * stranded); when the turn continues they are simulated like anyone
+     * else's.
+     */
+    private boolean deleteKeepsSupported(Coord target, String deleterId, boolean turnEnds) {
+        Set<Coord> remaining = new HashSet<>(blocks.keySet());
+        remaining.remove(target);
+        for (Coord c : remaining) {
+            if (c.y() == 0) {
+                continue;
+            }
+            boolean ok = false;
+            for (Coord n : neighbors(c)) {
+                if (remaining.contains(n)) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (!ok) {
+                return false;
+            }
+        }
+        Map<String, Set<Coord>> byOwner = new HashMap<>();
+        for (Map.Entry<Coord, Block> e : pending.entrySet()) {
+            String owner = e.getValue().byId();
+            if (turnEnds && deleterId.equals(owner)) {
+                continue; // cleared with the turn, not part of the simulation
+            }
+            byOwner.computeIfAbsent(owner, k -> new HashSet<>()).add(e.getKey());
+        }
+        for (Set<Coord> own : byOwner.values()) {
+            for (Coord c : own) {
+                if (c.y() == 0) {
+                    continue;
+                }
+                boolean ok = false;
+                for (Coord n : neighbors(c)) {
+                    if (remaining.contains(n) || own.contains(n)) {
+                        ok = true;
+                        break;
+                    }
+                }
+                if (!ok) {
+                    return false;
+                }
             }
         }
         return true;
@@ -582,6 +696,7 @@ public class VoxelWorld {
         root.put("type", "turn_granted");
         root.put("deadline", deadline);
         root.put("blocksPerTurn", props.getBlocksPerTurn());
+        root.put("deletesPerTurn", props.getDeletesPerTurn());
         return root.toString();
     }
 
@@ -624,6 +739,17 @@ public class VoxelWorld {
         root.put("y", c.y());
         root.put("z", c.z());
         root.put("reason", reason);
+        return root.toString();
+    }
+
+    private String blockDeletedJson(Coord c, String clientId) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("type", "block_deleted");
+        root.put("x", c.x());
+        root.put("y", c.y());
+        root.put("z", c.z());
+        root.put("by", nicknameOf(clientId));
+        root.put("byId", clientId);
         return root.toString();
     }
 

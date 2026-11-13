@@ -3,17 +3,22 @@ package com.example.voxel.service;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * voxel.turn-seconds / voxel.blocks-per-turn / voxel.placers-max / voxel.queue-max-length
- * (env: VOXEL_TURN_SECONDS / VOXEL_BLOCKS_PER_TURN / VOXEL_PLACERS_MAX / VOXEL_QUEUE_MAX_LENGTH).
- * Defaults per SPEC v2.
+ * voxel.turn-seconds / voxel.blocks-per-turn / voxel.deletes-per-turn /
+ * voxel.placers-max / voxel.queue-max-length / voxel.allowed-origins
+ * (env: VOXEL_TURN_SECONDS / VOXEL_BLOCKS_PER_TURN / VOXEL_DELETES_PER_TURN /
+ * VOXEL_PLACERS_MAX / VOXEL_QUEUE_MAX_LENGTH / VOXEL_ALLOWED_ORIGINS).
+ * Defaults per SPEC v3. allowed-origins is a comma-separated list; empty
+ * means the WebSocket Origin check is disabled (local dev only).
  */
 @ConfigurationProperties(prefix = "voxel")
 public class VoxelProperties {
 
     private int turnSeconds = 30;
     private int blocksPerTurn = 5;
+    private int deletesPerTurn = 1;
     private int placersMax = 3;
     private int queueMaxLength = 20;
+    private String allowedOrigins = "";
 
     public int getTurnSeconds() {
         return turnSeconds;
@@ -31,6 +36,14 @@ public class VoxelProperties {
         this.blocksPerTurn = blocksPerTurn;
     }
 
+    public int getDeletesPerTurn() {
+        return deletesPerTurn;
+    }
+
+    public void setDeletesPerTurn(int deletesPerTurn) {
+        this.deletesPerTurn = deletesPerTurn;
+    }
+
     public int getPlacersMax() {
         return placersMax;
     }
@@ -45,5 +58,13 @@ public class VoxelProperties {
 
     public void setQueueMaxLength(int queueMaxLength) {
         this.queueMaxLength = queueMaxLength;
+    }
+
+    public String getAllowedOrigins() {
+        return allowedOrigins;
+    }
+
+    public void setAllowedOrigins(String allowedOrigins) {
+        this.allowedOrigins = allowedOrigins;
     }
 }

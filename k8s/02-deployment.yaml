@@ -25,6 +25,9 @@ spec:
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
+          env:
+            - name: VOXEL_ALLOWED_ORIGINS
+              value: https://18443-agqwqndnto3jxy6psfynnflee4.instabox.tech
           resources:
             requests:
               cpu: "250m"

@@ -63,6 +63,7 @@ public class VoxelWebSocketHandler extends TextWebSocketHandler {
             case "place" -> handlePlace(clientId, node);
             case "move" -> handleMove(clientId, node);
             case "remove" -> handleRemove(clientId, node);
+            case "delete" -> handleDelete(clientId, node);
             case "confirm" -> send(world.confirm(clientId));
             case "cancel" -> send(world.cancel(clientId));
             case "rename" -> handleRename(clientId, node);
@@ -100,6 +101,15 @@ public class VoxelWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         send(world.remove(clientId,
+                node.get("x").asInt(), node.get("y").asInt(), node.get("z").asInt()));
+    }
+
+    private void handleDelete(String clientId, JsonNode node) {
+        if (!hasCoord(node)) {
+            send(world.errorTo(clientId, "bad_block", "delete 缺少 x/y/z 字段"));
+            return;
+        }
+        send(world.delete(clientId,
                 node.get("x").asInt(), node.get("y").asInt(), node.get("z").asInt()));
     }
 
