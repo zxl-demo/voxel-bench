@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方块世界 · 体素放置</title>
+<link rel="stylesheet" href="./style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.min.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="scene-container"></div>
+
+<div id="topbar">
+  <div class="title">🧊 方块世界</div>
+  <div class="online">在线 <span id="online-count">0</span> 人</div>
+</div>
+
+<div id="panel">
+  <div class="section" id="turn-section">
+    <div id="status-text">观看中</div>
+    <div id="countdown-wrap" class="hidden">
+      <div id="countdown-bar"></div>
+      <div id="countdown-text"></div>
+    </div>
+    <button id="queue-btn">抢占放置权</button>
+    <div id="queue-info"></div>
+  </div>
+
+  <div class="section">
+    <div class="label">材质</div>
+    <div id="materials" class="choices"></div>
+  </div>
+
+  <div class="section">
+    <div class="label">颜色</div>
+    <div id="colors" class="choices"></div>
+  </div>
+
+  <div class="section">
+    <div class="label">正在放置（<span id="placer-count">0</span>/<span id="placer-max">3</span>）</div>
+    <div id="placers"><div class="empty">暂无</div></div>
+  </div>
+
+  <div class="section">
+    <div class="label">排队中（<span id="waiting-count">0</span>）</div>
+    <div id="waiting"><div class="empty">暂无</div></div>
+  </div>
+</div>
+
+<div id="hint">左键拖动旋转 · 滚轮缩放 · 右键拖动平移 · 点击地面或方块表面放置</div>
+<div id="toast" class="hidden"></div>
+<div id="reconnect" class="hidden">连接已断开，正在重连…（重连后需重新排队）</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

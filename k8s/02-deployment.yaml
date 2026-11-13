@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voxel-java
+  namespace: voxel
+  labels:
+    app: voxel-java
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: voxel-java
+  template:
+    metadata:
+      labels:
+        app: voxel-java
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: instabox-ab19
+      containers:
+        - name: voxel-java
+          image: 100.125.54.90:5005/voxel-java:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"

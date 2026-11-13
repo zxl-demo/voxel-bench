@@ -1,0 +1,23 @@
+# Strip /voxel prefix before forwarding to the app (app serves at /)
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-voxel
+  namespace: voxel
+spec:
+  stripPrefix:
+    prefixes:
+      - /voxel
+---
+# Fix gateway Host rewrite: gateway rewrites Host to 127.0.0.1:18443
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: fix-host
+  namespace: voxel
+spec:
+  headers:
+    customRequestHeaders:
+      Host: "18443-agqwqndnto3jxy6psfynnflee4.instabox.tech"
+      X-Forwarded-Host: "18443-agqwqndnto3jxy6psfynnflee4.instabox.tech"
+      X-Forwarded-Proto: "https"
