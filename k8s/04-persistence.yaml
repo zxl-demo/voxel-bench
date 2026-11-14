@@ -1,0 +1,18 @@
+# v4: world snapshot storage. local-path provisions the volume on the node
+# of the first consumer; the voxel-java Pod is pinned to instabox-ab19, so
+# the snapshot lives on ab19's /data/k3s/storage and survives Pod restarts
+# and node suspend/resume cycles (the Pod always comes back on ab19).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: voxel-data
+  namespace: voxel
+  labels:
+    app: voxel-java
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi

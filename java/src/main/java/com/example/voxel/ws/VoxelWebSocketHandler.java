@@ -69,6 +69,9 @@ public class VoxelWebSocketHandler extends TextWebSocketHandler {
             case "rename" -> handleRename(clientId, node);
             default -> send(world.errorTo(clientId, "bad_block", "未知消息类型: " + type));
         }
+        // v4: persist the world if a confirmed mutation (confirm/delete) changed it.
+        // No-op when nothing changed or persistence is disabled.
+        world.persistIfDirty();
     }
 
     private void handlePlace(String clientId, JsonNode node) {

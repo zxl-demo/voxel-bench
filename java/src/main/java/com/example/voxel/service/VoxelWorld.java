@@ -5,6 +5,7 @@ import com.example.voxel.model.Coord;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.annotation.PreDestroy;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayDeque;
@@ -34,6 +35,12 @@ import java.util.concurrent.ThreadLocalRandom;
  * <p>v3 adds {@link #delete}: removing a confirmed block, simulated first so
  * no remaining block (confirmed or still-existing pending) is left floating.
  * Deleting up to the per-turn limit ends the turn at once.
+ *
+ * <p>v4 adds persistence: confirmed blocks are loaded from a JSON snapshot
+ * at startup (see {@link WorldStore}) and saved after every confirmed
+ * mutation (confirm / delete) plus on graceful shutdown. Only confirmed
+ * blocks persist; pending blocks, queue and turn state are per-session and
+ * are lost on restart, exactly like a disconnect.
  */
 @Service
 public class VoxelWorld {
@@ -62,6 +69,8 @@ public class VoxelWorld {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final VoxelProperties props;
+    private final WorldStore store;
+    private boolean dirty = false; // confirmed blocks changed since last save
 
     private final Map<Coord, Block> blocks = new HashMap<>();  // confirmed
     private final Map<Coord, Block> pending = new HashMap<>(); // pending confirmation
@@ -71,8 +80,36 @@ public class VoxelWorld {
     private final Map<String, Long> placing = new HashMap<>(); // clientId -> deadline epoch millis
     private final Map<String, Integer> deletesUsed = new HashMap<>(); // clientId -> deletes used this turn
 
-    public VoxelWorld(VoxelProperties props) {
+    public VoxelWorld(VoxelProperties props, WorldStore store) {
         this.props = props;
+        this.store = store;
+        for (Block b : store.load()) {
+            blocks.put(b.coord(), b);
+        }
+    }
+
+    /**
+     * Persist confirmed blocks if they changed since the last save. The
+     * snapshot is copied under the world lock; the file write happens
+     * outside it, so no I/O runs while the lock is held. Called by the WS
+     * handler after each message and on shutdown.
+     */
+    public void persistIfDirty() {
+        List<Block> snapshot;
+        synchronized (this) {
+            if (!dirty || !store.isEnabled()) {
+                return;
+            }
+            dirty = false;
+            snapshot = new ArrayList<>(blocks.values());
+        }
+        store.save(snapshot);
+    }
+
+    /** Final save on graceful shutdown (SIGTERM -> Spring context close). */
+    @PreDestroy
+    public void shutdown() {
+        persistIfDirty();
     }
 
     // ---- lifecycle -------------------------------------------------------
@@ -284,6 +321,7 @@ public class VoxelWorld {
                     errorJson("would_float", "删除后会有方块悬空")));
         }
         blocks.remove(coord);
+        dirty = true; // confirmed world changed -> persist after this message
         deletesUsed.put(clientId, used + 1);
         List<Outbound> out = new ArrayList<>();
         out.add(Outbound.all(blockDeletedJson(coord, clientId)));
@@ -313,6 +351,7 @@ public class VoxelWorld {
             confirmed.add(done);
         }
         if (!confirmed.isEmpty()) {
+            dirty = true; // confirmed world changed -> persist after this message
             out.add(Outbound.all(blocksConfirmedJson(confirmed)));
         }
         out.addAll(releaseTurnLocked(clientId, "confirmed", true));

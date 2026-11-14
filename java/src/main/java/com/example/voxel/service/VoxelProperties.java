@@ -4,11 +4,15 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
  * voxel.turn-seconds / voxel.blocks-per-turn / voxel.deletes-per-turn /
- * voxel.placers-max / voxel.queue-max-length / voxel.allowed-origins
+ * voxel.placers-max / voxel.queue-max-length / voxel.allowed-origins /
+ * voxel.persistence-file
  * (env: VOXEL_TURN_SECONDS / VOXEL_BLOCKS_PER_TURN / VOXEL_DELETES_PER_TURN /
- * VOXEL_PLACERS_MAX / VOXEL_QUEUE_MAX_LENGTH / VOXEL_ALLOWED_ORIGINS).
+ * VOXEL_PLACERS_MAX / VOXEL_QUEUE_MAX_LENGTH / VOXEL_ALLOWED_ORIGINS /
+ * VOXEL_PERSISTENCE_FILE).
  * Defaults per SPEC v3. allowed-origins is a comma-separated list; empty
  * means the WebSocket Origin check is disabled (local dev only).
+ * persistence-file is the JSON world snapshot path (v4); empty disables
+ * persistence (local dev).
  */
 @ConfigurationProperties(prefix = "voxel")
 public class VoxelProperties {
@@ -19,6 +23,7 @@ public class VoxelProperties {
     private int placersMax = 3;
     private int queueMaxLength = 20;
     private String allowedOrigins = "";
+    private String persistenceFile = "";
 
     public int getTurnSeconds() {
         return turnSeconds;
@@ -66,5 +71,13 @@ public class VoxelProperties {
 
     public void setAllowedOrigins(String allowedOrigins) {
         this.allowedOrigins = allowedOrigins;
+    }
+
+    public String getPersistenceFile() {
+        return persistenceFile;
+    }
+
+    public void setPersistenceFile(String persistenceFile) {
+        this.persistenceFile = persistenceFile;
     }
 }

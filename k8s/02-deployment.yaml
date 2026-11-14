@@ -28,6 +28,11 @@ spec:
           env:
             - name: VOXEL_ALLOWED_ORIGINS
               value: https://18443-agqwqndnto3jxy6psfynnflee4.instabox.tech
+            - name: VOXEL_PERSISTENCE_FILE
+              value: /data/voxel/world.json
+          volumeMounts:
+            - name: voxel-data
+              mountPath: /data/voxel
           resources:
             requests:
               cpu: "250m"
@@ -35,3 +40,7 @@ spec:
             limits:
               cpu: "1000m"
               memory: "512Mi"
+      volumes:
+        - name: voxel-data
+          persistentVolumeClaim:
+            claimName: voxel-data
